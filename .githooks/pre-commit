@@ -1,0 +1,14 @@
+#!/bin/sh
+# Bumps the userscript's @version (patch number) on every commit that changes it,
+# unless the commit already changes @version itself. Violentmonkey only installs an
+# update when the version goes up, so this keeps the TV picking up every change.
+f=animepahe-tv.user.js
+
+git diff --cached --quiet -- "$f" && exit 0
+git diff --cached -U0 -- "$f" | grep -q '^+// @version' && exit 0
+
+old=$(sed -n 's|^// @version *||p' "$f" | head -n 1)
+new=$(echo "$old" | awk -F. '{ printf "%d.%d.%d", $1, $2, $3 + 1 }')
+sed -i "s|^// @version .*|// @version      $new|" "$f"
+git add "$f"
+echo "pre-commit: $f version $old -> $new"

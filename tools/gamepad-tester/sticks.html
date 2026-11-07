@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stick Tester</title>
+<style>
+  :root { --bg: #111; --fg: #eee; --dim: #888; --accent: #d5015b; }
+  body { margin: 0; padding: 3vh 4vw; background: var(--bg); color: var(--fg); font: 20px/1.4 system-ui, sans-serif; }
+  #prompt { font-size: 38px; font-weight: 700; padding: .5em .7em; border: 3px solid var(--accent); border-radius: 12px; }
+  #prompt small { display: block; font-size: 20px; font-weight: 400; color: var(--dim); }
+  #progress { color: var(--dim); margin-top: .4em; }
+  .sticks { display: flex; gap: 6vw; margin: 3vh 0; align-items: center; }
+  .stick { position: relative; width: 220px; height: 220px; border: 3px solid #444; border-radius: 50%; }
+  .stick i { position: absolute; width: 24px; height: 24px; margin: -12px; border-radius: 50%; background: var(--accent); left: 50%; top: 50%; }
+  .label { text-align: center; color: var(--dim); }
+  .trig { width: 60px; height: 220px; border: 3px solid #444; border-radius: 8px; position: relative; }
+  .trig i { position: absolute; left: 0; right: 0; bottom: 0; background: var(--accent); }
+  pre { font-size: 16px; color: var(--dim); }
+</style>
+</head>
+<body>
+<div id="prompt">Press any button on the controller<small>Stick &amp; trigger test, about 30 seconds.</small></div>
+<div id="progress"></div>
+<div class="sticks">
+  <div><div class="stick"><i id="ls"></i></div><div class="label">axes 0 / 1</div></div>
+  <div><div class="stick"><i id="rs"></i></div><div class="label">axes 2 / 3</div></div>
+  <div><div class="trig"><i id="l2"></i></div><div class="label">b6</div></div>
+  <div><div class="trig"><i id="r2"></i></div><div class="label">b7</div></div>
+</div>
+<pre id="live"></pre>
+
+<script>
+'use strict';
+// One control per step, everything else hands-off, so each reading can be attributed to one input.
+const STEPS = [
+  { name: 'left stick',  prompt: 'LEFT stick only: full circles',  sub: 'Push it to the edge and keep rotating. Don\'t touch anything else.' },
+  { name: 'right stick', prompt: 'RIGHT stick only: full circles', sub: 'Push it to the edge and keep rotating. Don\'t touch anything else.' },
+  { name: 'L2',          prompt: 'L2 only: squeeze slowly, release slowly', sub: 'Repeat until the next prompt. Don\'t touch the sticks.' },
+  { name: 'R2',          prompt: 'R2 only: squeeze slowly, release slowly', sub: 'Repeat until the next prompt. Don\'t touch the sticks.' },
+];
+const STEP_MS = 6000, IDLE_MS = 1000;
+const report = { kind: 'sticks-isolated', userAgent: navigator.userAgent, gamepad: null, steps: [] };
+const $ = id => document.getElementById(id);
+const pad = () => { for (const p of navigator.getGamepads()) if (p && p.connected) return p; return null; };
+const r2 = v => +v.toFixed(2);
+
+let step = -1, phase = 'connect', since = 0, cur = null, lastAxes = null, lastTs = null;
+
+function isIdle(p) { return Array.from(p.axes).every(v => Math.abs(v) < 0.15) && p.buttons.every(b => b.value < 0.05); }
+
+function startStep(i, now) {
+  step = i;
+  if (step >= STEPS.length) return finish();
+  const s = STEPS[step];
+  $('prompt').innerHTML = `${s.prompt}<small>${s.sub} The ${STEP_MS / 1000}s timer starts when you move.</small>`;
+  $('progress').textContent = `Step ${step + 1} of ${STEPS.length}`;
+  cur = { name: s.name, frames: 0, changeFrames: 0, tsChanges: 0, axMin: [], axMax: [], btnMax: [], btnValues: [] };
+  phase = 'wait-move'; since = now;
+}
+
+function endStep() {
+  const secs = (performance.now() - since) / 1000;
+  report.steps.push({
+    name: cur.name,
+    rafFps: r2(cur.frames / secs),
+    inputUpdatesPerSec: r2(cur.changeFrames / secs),
+    timestampUpdatesPerSec: r2(cur.tsChanges / secs),
+    axisMin: cur.axMin.map(r2), axisMax: cur.axMax.map(r2),
+    // only buttons that moved at all
+    buttons: cur.btnMax.map((m, i) => m > 0 ? { index: i, max: r2(m), distinctValues: cur.btnValues[i].size } : null).filter(Boolean),
+  });
+  cur = null;
+  phase = 'wait-idle'; since = performance.now();
+  $('prompt').innerHTML = 'Let go of everything<small>Next step starts in a moment.</small>';
+}
+
+function finish() {
+  phase = 'done'; cur = null;
+  $('prompt').innerHTML = 'Done — thanks!<small>Sending results to the PC…</small>';
+  $('progress').textContent = '';
+  fetch('/report', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(report, null, 2) })
+    .then(r => $('prompt').innerHTML = r.ok ? 'Done — results sent to the PC.' : `Send failed: HTTP ${r.status}`)
+    .catch(e => $('prompt').innerHTML = `Send failed: ${e}`);
+}
+
+function tick(now) {
+  const p = pad();
+  if (p) {
+    const a = Array.from(p.axes), b = p.buttons;
+    $('ls').style.left = 50 + a[0] * 50 + '%'; $('ls').style.top = 50 + a[1] * 50 + '%';
+    $('rs').style.left = 50 + a[2] * 50 + '%'; $('rs').style.top = 50 + a[3] * 50 + '%';
+    $('l2').style.height = b[6].value * 100 + '%'; $('r2').style.height = b[7].value * 100 + '%';
+    $('live').textContent = `axes: ${a.map(v => v.toFixed(2)).join('  ')}\nbuttons: ${b.map((x, i) => x.value > 0 ? `b${i}=${x.value.toFixed(2)}` : '').filter(Boolean).join('  ') || '—'}`;
+
+    if (phase === 'connect') {
+      report.gamepad = { id: p.id, mapping: p.mapping, axes: a.length, buttons: b.length };
+      phase = 'wait-idle'; since = now;
+      $('prompt').innerHTML = 'Controller found!<small>Let go of everything — the test starts in a moment.</small>';
+    } else if (phase === 'wait-idle') {
+      if (!isIdle(p)) since = now;
+      else if (now - since > IDLE_MS) startStep(step + 1, now);
+    } else if (phase === 'wait-move') {
+      if (!isIdle(p)) { phase = 'measure'; since = now; }
+    }
+    if (phase === 'measure') {
+      cur.frames++;
+      if (lastAxes && (a.some((v, i) => v !== lastAxes[i]))) cur.changeFrames++;
+      if (lastTs !== null && p.timestamp !== lastTs) cur.tsChanges++;
+      a.forEach((v, i) => { cur.axMin[i] = Math.min(cur.axMin[i] ?? 0, v); cur.axMax[i] = Math.max(cur.axMax[i] ?? 0, v); });
+      b.forEach((x, i) => { cur.btnMax[i] = Math.max(cur.btnMax[i] ?? 0, x.value); (cur.btnValues[i] ??= new Set()).add(r2(x.value)); });
+      if (now - since > STEP_MS) endStep();
+    }
+    lastAxes = a; lastTs = p.timestamp;
+  }
+  requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+</script>
+</body>
+</html>

@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gamepad Tester</title>
+<style>
+  :root { --bg: #111; --fg: #eee; --dim: #888; --accent: #d5015b; --ok: #3c3; --warn: #e93; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 3vh 4vw; background: var(--bg); color: var(--fg); font: 20px/1.4 system-ui, sans-serif; }
+  h1 { margin: 0 0 .4em; font-size: 30px; }
+  h2 { margin: 1em 0 .3em; font-size: 22px; color: var(--accent); }
+  .row { display: flex; gap: 3vw; flex-wrap: wrap; }
+  .col { flex: 1 1 420px; min-width: 0; }
+  #prompt { font-size: 40px; font-weight: 700; padding: .5em .7em; border: 3px solid var(--accent); border-radius: 12px; margin: .3em 0 .2em; }
+  #prompt small { display: block; font-size: 20px; font-weight: 400; color: var(--dim); }
+  #progress { color: var(--dim); }
+  .meta { font-family: ui-monospace, monospace; font-size: 17px; word-break: break-all; }
+  .btns { display: grid; grid-template-columns: repeat(auto-fill, minmax(78px, 1fr)); gap: 6px; }
+  .b { padding: 6px; border: 2px solid #333; border-radius: 8px; text-align: center; font-family: ui-monospace, monospace; font-size: 16px; }
+  .b.on { border-color: var(--accent); background: #3a0d20; }
+  .ax { display: grid; grid-template-columns: 60px 1fr 80px; gap: 8px; align-items: center; font-family: ui-monospace, monospace; font-size: 16px; margin: 3px 0; }
+  .bar { position: relative; height: 14px; background: #222; border-radius: 7px; }
+  .bar i { position: absolute; top: 0; bottom: 0; left: 50%; background: var(--accent); }
+  #keys { font-family: ui-monospace, monospace; font-size: 15px; color: var(--dim); white-space: pre; max-height: 260px; overflow: hidden; }
+  table { border-collapse: collapse; font-size: 17px; width: 100%; }
+  td, th { border-bottom: 1px solid #333; padding: 4px 8px; text-align: left; font-family: ui-monospace, monospace; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); }
+</style>
+</head>
+<body>
+<h1>Gamepad tester</h1>
+<div id="prompt">Press any button on the controller<small>Firefox only exposes a gamepad after its first button press.</small></div>
+<div id="progress"></div>
+
+<div class="row">
+  <div class="col">
+    <h2>Live</h2>
+    <div id="meta" class="meta">No gamepad yet. navigator.getGamepads: <span id="api"></span> · secure context: <span id="secure"></span></div>
+    <h2>Buttons</h2><div id="buttons" class="btns"></div>
+    <h2>Axes</h2><div id="axes"></div>
+  </div>
+  <div class="col">
+    <h2>Key events &amp; back navigation</h2>
+    <div id="keys"></div>
+    <h2>Results</h2>
+    <table id="results"><thead><tr><th>Control</th><th>Buttons</th><th>Axes</th><th>Keys</th></tr></thead><tbody></tbody></table>
+    <div id="sent"></div>
+  </div>
+</div>
+
+<script>
+'use strict';
+// Guided steps. "kind" only changes the prompt wording; detection is generic.
+const STEPS = [
+  ['Cross (X)', 'press'], ['Circle', 'press'], ['Square', 'press'], ['Triangle', 'press'],
+  ['L1', 'press'], ['R1', 'press'], ['L2', 'press all the way'], ['R2', 'press all the way'],
+  ['Share', 'press'], ['Options', 'press'], ['L3 (click left stick)', 'press'], ['R3 (click right stick)', 'press'],
+  ['D-pad Up', 'press'], ['D-pad Down', 'press'], ['D-pad Left', 'press'], ['D-pad Right', 'press'],
+  ['Left stick RIGHT', 'push and hold'], ['Left stick DOWN', 'push and hold'],
+  ['Right stick RIGHT', 'push and hold'], ['Right stick DOWN', 'push and hold'],
+];
+const STEP_TIMEOUT_MS = 12000, AXIS_DELTA = 0.5, HOLD_MS = 400;
+
+const $ = id => document.getElementById(id);
+const keyLog = [];
+const report = { userAgent: navigator.userAgent, secureContext: window.isSecureContext, startedAt: new Date().toISOString(),
+                 gamepad: null, rest: null, steps: [], backNavigations: 0, pollRateHz: null };
+
+$('api').textContent = typeof navigator.getGamepads === 'function' ? 'available' : 'MISSING';
+$('secure').textContent = String(window.isSecureContext);
+
+function logKey(line) {
+  keyLog.unshift(new Date().toISOString().slice(11, 23) + '  ' + line);
+  keyLog.length = Math.min(keyLog.length, 14);
+  $('keys').textContent = keyLog.join('\n');
+  if (current) current.keys.push(line);
+}
+for (const type of ['keydown', 'keyup']) {
+  addEventListener(type, e => {
+    logKey(`${type.padEnd(7)} key=${e.key} code=${e.code} keyCode=${e.keyCode}`);
+    e.preventDefault();
+  }, true);
+}
+// Trap Android Back (Circle may be mapped to it) so the page doesn't navigate away.
+history.pushState({ trap: 1 }, '');
+addEventListener('popstate', () => { report.backNavigations++; logKey('*** BACK navigation (popstate) ***'); history.pushState({ trap: 1 }, ''); });
+
+addEventListener('gamepadconnected', e => logKey(`gamepadconnected #${e.gamepad.index} "${e.gamepad.id}" mapping="${e.gamepad.mapping}"`));
+addEventListener('gamepaddisconnected', e => logKey(`gamepaddisconnected #${e.gamepad.index}`));
+
+function pad() {
+  const list = navigator.getGamepads ? navigator.getGamepads() : [];
+  for (const p of list) if (p && p.connected) return p;
+  return null;
+}
+const snap = p => ({ buttons: p.buttons.map(b => b.value), pressed: p.buttons.map(b => b.pressed), axes: Array.from(p.axes) });
+
+let built = false;
+function renderLive(p) {
+  if (!built) {
+    $('buttons').innerHTML = p.buttons.map((_, i) => `<div class="b" id="b${i}">${i}</div>`).join('');
+    $('axes').innerHTML = p.axes.map((_, i) => `<div class="ax"><span>a${i}</span><div class="bar"><i id="ab${i}"></i></div><span id="av${i}"></span></div>`).join('');
+    built = true;
+  }
+  $('meta').textContent = `index=${p.index}  id="${p.id}"  mapping="${p.mapping || '(empty)'}"  buttons=${p.buttons.length}  axes=${p.axes.length}`;
+  p.buttons.forEach((b, i) => {
+    const el = $('b' + i);
+    el.classList.toggle('on', b.pressed || b.value > 0.1);
+    el.textContent = b.value > 0 && b.value < 1 ? `${i}: ${b.value.toFixed(2)}` : String(i);
+  });
+  p.axes.forEach((v, i) => {
+    const bar = $('ab' + i);
+    bar.style.left = (v < 0 ? 50 + v * 50 : 50) + '%';
+    bar.style.width = Math.abs(v) * 50 + '%';
+    $('av' + i).textContent = v.toFixed(2);
+  });
+}
+
+// --- guided test state machine ---
+let stepIdx = -1, current = null, phase = 'wait-connect', phaseSince = 0, rest = null;
+let tsCount = 0, tsLast = null, tsStart = 0;
+
+function setPrompt(main, sub) { $('prompt').innerHTML = `${main}<small>${sub || ''}</small>`; }
+
+function diff(p) {
+  const s = snap(p), d = { buttons: [], axes: [] };
+  s.buttons.forEach((v, i) => { if (v > 0.5 && rest.buttons[i] <= 0.5) d.buttons.push({ index: i, value: +v.toFixed(2) }); });
+  s.axes.forEach((v, i) => { if (Math.abs(v - rest.axes[i]) > AXIS_DELTA) d.axes.push({ index: i, value: +v.toFixed(2), rest: +rest.axes[i].toFixed(2) }); });
+  return d;
+}
+const isRest = p => { const d = diff(p); return !d.buttons.length && !d.axes.length; };
+
+function nextStep(now) {
+  stepIdx++;
+  if (stepIdx >= STEPS.length) return finish();
+  const [name, verb] = STEPS[stepIdx];
+  current = { control: name, buttons: [], axes: [], keys: [], detected: false };
+  phase = 'wait-press'; phaseSince = now;
+  setPrompt(`${verb[0].toUpperCase() + verb.slice(1)}: ${name}`, `Skips itself after ${STEP_TIMEOUT_MS / 1000}s if nothing is detected.`);
+  $('progress').textContent = `Step ${stepIdx + 1} of ${STEPS.length}`;
+}
+
+function record(now) {
+  report.steps.push(current);
+  const fmt = a => a.map(x => x.rest !== undefined ? `a${x.index}=${x.value} (rest ${x.rest})` : `b${x.index}=${x.value}`).join(', ');
+  const tr = document.createElement('tr');
+  tr.innerHTML = `<td>${current.control}</td><td class="${current.detected ? 'ok' : 'warn'}">${fmt(current.buttons) || (current.detected ? '—' : 'not detected')}</td><td>${fmt(current.axes) || '—'}</td><td>${current.keys.filter(k => k.startsWith('keydown')).map(k => k.split(' ').find(t => t.startsWith('key='))).join(' ') || '—'}</td>`;
+  $('results').tBodies[0].appendChild(tr);
+  current = null;
+}
+
+function finish() {
+  phase = 'done';
+  setPrompt('Done — thanks!', 'Sending results to the PC… The live view keeps working.');
+  $('progress').textContent = '';
+  fetch('/report', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(report, null, 2) })
+    .then(r => { $('sent').innerHTML = r.ok ? '<p class="ok">Results sent to the PC.</p>' : `<p class="warn">Send failed: HTTP ${r.status}</p>`; })
+    .catch(e => { $('sent').innerHTML = `<p class="warn">Send failed: ${e}</p>`; });
+}
+
+function tick(now) {
+  const p = pad();
+  if (p) {
+    renderLive(p);
+    if (tsLast !== p.timestamp) { tsLast = p.timestamp; tsCount++; }
+    if (!tsStart) tsStart = now;
+    if (now - tsStart > 5000 && report.pollRateHz === null) report.pollRateHz = +(tsCount / ((now - tsStart) / 1000)).toFixed(1);
+
+    if (phase === 'wait-connect') {
+      report.gamepad = { id: p.id, mapping: p.mapping, buttons: p.buttons.length, axes: p.axes.length };
+      phase = 'wait-rest'; phaseSince = now;
+      setPrompt('Controller found!', 'Let go of everything — the test starts in a moment.');
+    } else if (phase === 'wait-rest') {
+      // need all buttons released and sticks centred for 1.5 s before taking the baseline
+      const s = snap(p), idle = s.buttons.every(v => v < 0.1) && s.axes.every((v, i) => Math.abs(v) < 0.3 || Math.abs(v) > 0.95);
+      if (!idle) phaseSince = now;
+      else if (now - phaseSince > 1500) { rest = s; report.rest = { axes: s.axes.map(v => +v.toFixed(2)) }; nextStep(now); }
+    } else if (phase === 'wait-press') {
+      const d = diff(p);
+      if (d.buttons.length || d.axes.length) {
+        // keep the strongest reading seen while held
+        for (const k of ['buttons', 'axes']) for (const x of d[k]) {
+          const prev = current[k].find(y => y.index === x.index);
+          if (!prev) current[k].push(x); else if (Math.abs(x.value) > Math.abs(prev.value)) prev.value = x.value;
+        }
+        current.detected = true;
+        if (now - phaseSince > HOLD_MS) { phase = 'wait-release'; phaseSince = now; setPrompt('Got it — let go', ''); }
+      } else if (current.detected) { phase = 'wait-release'; phaseSince = now; }
+      else if (now - phaseSince > STEP_TIMEOUT_MS) { record(now); nextStep(now); }
+    } else if (phase === 'wait-release') {
+      if (!isRest(p)) phaseSince = now;
+      else if (now - phaseSince > 500) { record(now); nextStep(now); }
+    }
+  } else if (phase === 'wait-press' && current && now - phaseSince > STEP_TIMEOUT_MS) {
+    record(now); nextStep(now);
+  }
+  requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+</script>
+</body>
+</html>
