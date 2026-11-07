@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AnimePahe TV
 // @namespace    https://github.com/bokimitsu/streampad
-// @version      0.1.0
+// @version      0.1.1
 // @description  DualShock 4 controls and a 10-foot layout for AnimePahe on Android TV.
 // @author       bokimitsu
 // Site and player domains: keep these @match lines in sync with CONFIG.siteDomains / CONFIG.playerDomains.
@@ -482,6 +482,7 @@
         el.textContent = [
           'AnimePahe TV v' + VERSION + '   ' + (core.state.enabled ? 'ON' : 'OFF'),
           'page: ' + core.state.page,
+          'viewport: ' + innerWidth + 'x' + innerHeight + ' @' + devicePixelRatio + 'x',
           'focus: ' + describe(document.activeElement),
           '',
           'pad: ' + (pad ? pad.id + ' [' + pad.mapping + ']' : live && live.everSeen ? 'lost' : 'none yet'),
